@@ -161,3 +161,7 @@ cython_debug/
 
 #vscode
 logs/
+
+# rachel
+*.csv
+*.xlsx
