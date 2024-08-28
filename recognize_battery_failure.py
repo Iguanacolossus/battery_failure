@@ -8,10 +8,20 @@ def read_in_data(file, labels):
     df = pd.read_csv('data/' + file)
     df = df.drop_duplicates()
     df['ds'] = pd.to_datetime(df['ReadDateTime'])
+    df = df.groupby(['BolusId', 'ds']).agg({'Voltage': 'mean', 'BattRaw': 'mean', 'Battery': 'max'}).reset_index()
     fails = pd.read_csv('data/' + labels)
     df.loc[df['BolusId'].isin(fails['BolusId'].unique()), "failed"] = 1
     df.loc[~df['BolusId'].isin(fails['BolusId'].unique()), "failed"] = 0
     df = df[['BolusId', 'Voltage', 'ds', 'failed', 'Battery']]
+    # addition failures from nick
+    df2 = pd.read_csv('data/SaftBatteryFailures.csv')
+    df2['ds'] = [x.date() for x in pd.to_datetime(df2['ReadDateTime'])]
+    df2 = df2.groupby(['BolusId', 'ds']).agg({'Voltage': 'mean', 'BattRaw': 'mean'}).reset_index()
+    df2['failed'] = 1
+    df2['Battery'] = 'Saft'
+    df2 = df2[['BolusId', 'Voltage', 'ds', 'failed', 'Battery']]
+    df2['ds'] = df['ds'].apply(lambda x: np.datetime64(x))
+    df = pd.concat([df, df2])
     return df
 
 def get_segment(data, days_in=10, through=20):
@@ -40,11 +50,22 @@ def get_segment(data, days_in=10, through=20):
 
     return tmp
 
+def get_begining_of_life(data, days_in=100):
+    tmp = data.sort_values(['BolusId', 'ds'], ascending=[True, True])
+    tmp = tmp.groupby('BolusId').apply(lambda x: x.iloc[0: days_in +1]).reset_index(drop=True)
+    tmp['time_step'] = tmp.groupby('BolusId').cumcount(ascending=True) + 1
+    return tmp
+
+
 def pre_processing(data):
     X = data.pivot(columns='time_step', index=['BolusId', 'failed', 'Battery'], values='Voltage').reset_index()
     y = X[['failed', 'Battery', 'BolusId']]
-    X = X.drop(['failed', 'Battery','BolusId'], axis=1)
-    return X, y
+    X_train, X_test, y_train, y_test = train_test_split(X, y['failed'], test_size=0.30, random_state=42, stratify=y['failed'], shuffle=True)
+    X_test_ids = X_test[['BolusId', 'Battery']]
+    X_train = X_train.drop(['failed', 'Battery', 'BolusId'], axis=1)
+    X_test = X_test.drop(['failed', 'Battery', 'BolusId'], axis=1)
+    
+    return X_train, X_test, y_train, y_test, X_test_ids 
 
 def augment_data():
     # chop up the failures to create more of them
@@ -68,8 +89,8 @@ def my_cm(y_true, y_pred):
     
     return cm.sum()[['tp', 'tn', 'fp', 'fn']]
 
-def model(X, y):
-    X_train, X_test, y_train, y_test = train_test_split(X, y['failed'], test_size=0.2, random_state=42, stratify=y['failed'])
+def model(data):
+    X_train, X_test, y_train, y_test, X_test_ids = pre_processing(data)
     clf = xgb.XGBClassifier(objective='binary:logistic', eval_metric='error')
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_test)
@@ -77,7 +98,13 @@ def model(X, y):
     print(f"Accuracy: {accuracy}")
     confusion = my_cm(y_test, y_pred)
     print(f"Confusion Matrix: \n { confusion}")
-    return y_test, y_pred
+    output = X_test
+    output['BolusId'] = X_test_ids['BolusId']
+    output['Battery'] = X_test_ids['Battery']
+    output['pred'] = y_pred
+    output['true'] = y_test
+
+    return output
 
 
 def run(file, label_file):
@@ -89,11 +116,12 @@ def run(file, label_file):
     
 
 if __name__ == '__main__':
-    #X, y = run('TadiranvsSaft_3-28-24_DailyAVG.csv', "Failed_units_Forest_view.csv")
     df_raw = read_in_data('TadiranvsSaft_3-28-24_DailyAVG.csv', "Failed_units_Forest_view.csv")
-    df = get_segment(df_raw, days_in=90, through=120)
-    X, y = pre_processing(df)
-    y_test, y_pred = model(X,y)
+    df =  get_begining_of_life(df_raw, days_in=150)
+    output = model(df)
+    
+    
+    print(output['true'].value_counts())
 
     # at 60 days before failure it can predict failure vs not failure very well. i need to take snapshot back in time and see how early we can recofnize failure.
     # 
